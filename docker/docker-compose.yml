@@ -1,0 +1,114 @@
+version: '2.2'
+
+volumes:
+    static-files:
+    media-files:
+
+services:
+
+  postgis:
+    image: mbari/mbdb-postgis
+    build:
+        context: .
+        dockerfile: Dockerfile-postgis
+    volumes:
+      - ${POSTGRES_DATA}:/var/lib/postgresql/data
+      - ${POSTGRES_WALDIR}:/var/lib/postgresql/waldir
+      - ./postgres-mbdb.conf:/etc/postgresql.conf
+    command: postgres -c config_file=/etc/postgresql.conf
+    ports:
+      - "${MBDB_PGHOST_PORT}:5432"
+    # Set user for deployment on MacOS, assign HOST_UID=<result of `id -u`> in your .env file
+    ##user: ${HOST_UID}
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - MBDBADMIN_PASSWORD=${MBDBADMIN_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data
+      - POSTGRES_INITDB_WALDIR=/var/lib/postgresql/waldir
+    container_name: mbdb-postgis
+    oom_kill_disable: true
+    env_file:
+      - ./.env
+
+  mapserver:
+    image: geodata/mapserver:7.0.1
+    volumes:
+      - ${MBDB_VOLS_DIR}/maps:${URL_MAPFILE_DIR}:ro
+    container_name: stoqs-mapserver
+    # Expose port 80 if PRODUCTION=false - Note: PRODUCTION=false doesn't work (March 2019)
+    ##ports:
+    ##  - "80:80"
+    env_file:
+      - ./.env
+
+  mbdb:
+    image: mbari/mbdb
+    build:
+        context: .
+        dockerfile: Dockerfile-mbdb
+    volumes:
+      - ${MBDB_VOLS_DIR}/maps:${MAPFILE_DIR}
+      - ${MBDB_VOLS_DIR}/mbdb_root:/root
+      - ${MBDB_VOLS_DIR}/nginx:/usr/share/nginx
+      - ${MBDB_VOLS_DIR}/pg_dumps:/srv/media-files/pg_dumps
+      - ${MBDB_HOME}:/srv
+      - static-files:/srv/static-files
+      - media-files:/srv/media-files
+    environment:
+      - DATABASE_URL=postgis://${MBDBADMIN_USER}:${MBDBADMIN_PASSWORD}@${MBDB_PGHOST}:${MBDB_PGHOST_PORT}/mbdb
+      - DATABASE_SUPERUSER_URL=postgis://postgres:${POSTGRES_PASSWORD}@${MBDB_PGHOST}:${MBDB_PGHOST_PORT}/mbdb
+      - PGHOST=${MBDB_PGHOST}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - MAPSERVER_HOST=${MAPSERV_SERVER_NAME}
+      - URL_MAPFILE_DIR=/maps
+      - STATIC_URL=/static/
+      - STATIC_ROOT=/srv/static-files
+      - MEDIA_URL=/media/
+      - MEDIA_ROOT=/srv/media-files
+      - NGINX_SERVER_NAME=${NGINX_SERVER_NAME}
+      - UWSGI_READ_TIMEOUT=${UWSGI_READ_TIMEOUT}
+      - DJANGO_DEBUG=${DJANGO_DEBUG}
+      - USER=${USER}
+    container_name: mbdb
+    depends_on:
+      - mapserver
+      - postgis
+    ports:
+      - "8888:8888"
+    # Expose port 8000 if PRODUCTION=false - Note: PRODUCTION=false doesn't work (March 2019)
+    ##  - "8000:8000"
+    env_file:
+      - ./.env
+
+  # Disable nginx service if PRODUCTION=false - Note: PRODUCTION=false doesn't work (March 2019)
+  nginx:
+    image: mbari/mbdb-nginx
+    build:
+        context: .
+        dockerfile: Dockerfile-nginx
+    volumes:
+      - ${MBDB_VOLS_DIR}/html:/srv/html
+      - ${MBDB_VOLS_DIR}/pg_dumps:/srv/media-files/pg_dumps
+      - static-files:/srv/static-files
+      - media-files:/srv/media-files
+    environment:
+      - NGINX_TMPL=${NGINX_TMPL}
+    container_name: mbdb-nginx
+    ports:
+      - "80:80"
+      - "8000:8000"
+      - "443:443"
+    depends_on:
+      - mbdb
+    env_file:
+      - ./.env
+
+  # Uncomment to restart services when new images pushed to docker hub, for continuous deployment
+  # - Requires also a 'git pull' from https://github.com/stoqs/stoqs.git
+  ##watchtower:
+  ##  container_name: watchtower
+  ##  image: containrrr/watchtower
+  ##  volumes:
+  ##    - /var/run/docker.sock:/var/run/docker.sock
+  ##  restart: unless-stopped
+  ##  command: stoqs mapserver postgis nginx --interval 30
